@@ -5,4 +5,5 @@
 * [1965-fengkang]-fem-with-scan.pdf: 同上，附扫描版本
 * fk-life.pdf：冯康生平
 * ftla-1993.pdf: Gilbert Strang 1993 年的一篇论文：线性代数基本定理
+* bingham-1941.pdf: 1941年,矩阵求逆的一种新方法
 
