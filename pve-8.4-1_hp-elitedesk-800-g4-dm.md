@@ -139,6 +139,8 @@ The following is the default IOMMU group info after enabling IOMMU:
 - `apt update/upgrade`;
 - `apt install sudo binutils build-essential git tig htop tmux inxi nmon parted ranger ncdu inxi ripgrep libguestfs-tools`
 - install linux headers: `apt install pve-headers-$(uname -r)`. headers will be installed under `/usr/src/linux-headers-$(uname -r)` folder. a symlink to it will be created at `/lib/modules/$(uname -r)/build`.
+- install linux source: `apt install pve-kernel-$(uname -r)`. kernel source will be installed under `/usr/src/linux-headers-$(uname -r)` folder. a symlink to it will be created at `/lib/modules/$(uname -r)/build`.
+
 - remove subscription popup: `sed -i.bak "s/data.status !== 'Active'/false/g" /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js && systemctl restart pveproxy.service`
 - [install `netbird`](https://docs.netbird.io/how-to/installation), by `curl -fsSL https://pkgs.netbird.io/install.sh | sh`.
 
@@ -236,7 +238,7 @@ source /etc/network/interfaces.d/*
 
     - Run `update-initramfs -u -k all` to update initramfs accordingly for all kernels.
 
-- Reboot the host, now the display should freeze around `Loading initial ramdisk ...`. SSH to the host and check that IOMMU is enabled, and both iGPU ()`0:2.0`) and sound card (`0:1f.3`) are in their separate IOMMU groups (and bound to `vfio_pci` driver):
+- Reboot the host, now the display should freeze around `/dev/mapper/pve-root: clean ...`. SSH to the host and check that IOMMU is enabled, and both iGPU ()`0:2.0`) and sound card (`0:1f.3`) are in their separate IOMMU groups (and bound to `vfio_pci` driver):
 
     ```
     root@pve:~# dmesg |grep -e EMAR -e IOMMU -e AMD-Vi
@@ -541,6 +543,182 @@ Brief notes:
     Jun 03 20:35:58 pve kernel: e1000e 0000:00:1f.6 eno1 (unregistering): left promiscuous mode
     Jun 03 20:35:58 pve kernel: vmbr0: port 1(eno1) entered disabled state
     ```
+- `vfio-pci 0000:00:1f.3: enabling device (0100 -> 0102)`: this indicates that the audio device is enabled for the VM, although the kvm shows the following warnings, manifesting that this physical function `0:1f.3` does not supporting `FLReset` (Function Level Reset):
+
+    ```
+    kvm: vfio: Cannot reset device 0000:00:1f.3, no available reset mechanism.
+    kvm: vfio: Cannot reset device 0000:00:1f.3, no available reset mechanism.
+    ```
+
+    - Two audio devices shown up in windows device manager:
+        - `Synaptics HD Audio`
+        - `英特尔(R)显示器音频` ("Intel (R) Display Audio")
+
+    - The problem: when restart the VM, this line will not shown (may or may not critical), and most of the time (but not always), the "Intel (R) Display Audio" will be missing from the Windows VM, thus outputing audio from DP is not possible.
+
+# Troubleshooting for Audio Output via DP
+
+## Basic understanding
+
+The simplified audio processing pipeline:
+
+```
+             audio codec                        output encoder
+audio media ------------> decoded audio signal ----------------> output channel
+```
+
+The usual output channels are:
+
+- Audio output jacket
+- Internal speaker
+- DP/HDMI port
+- Bluebooth
+
+For decoded audio signal to be muxed with DP/HDMI signal for output, it seems that there should be a connection between audio decoder and the iGPU's output encoder. For Q370 PCH and Intel iGPU, it's assumed that there is a physical link between the two, and the link will be setup properly when both iGPU and audio device are configured properly.
+
+## The symptom
+
+For the first start of Windows 11 VM after host reboot, the DP output channel for audio is most likely ok. But if the VM is restarted (either reboot via VM's UI, or reboot using `qm start/stop/reboot <VMID>` cmd), the DP output channel will disappear most of the time (sometimes ok but rare). Inspecting the Windows device manager, it shows that：
+
+- when DP output is ok, we have two audio devices:
+
+    - `Synaptics HD Audio`: whose last known parent object is `PCI\VEN_8086&DEV_A348&SUBSYS_83E2103C&REV_10\3&267a616a&0&88` (i.e., `8086:a348`)
+    - `Intel(R) Display Audio`: whose last known parent object is the same (i.e., also `8086:a348`)
+
+- when DP output is NOT ok, the second devices `Intel(R) Display Audio` disappers. this suggests that this device represents the connection between the audio codec and the iGPU output encoder.
+
+Btw, inspecting the [`lspci` for Windows](https://eternallybored.org/misc/pciutils/releases/pciutils-3.5.5-win64.zip) output in each case shows that there is no difference in the output (particularly for the audio device `8086:a348`):
+
+```
+PS C:\users\bruin\Downloads\pciutils-3.5.5-win64> .\lspci.exe -tvnn
+-[0000:00]-+-00.0  Intel Corporation 440FX - 82441FX PMC [Natoma] [8086:1237]
+           +-01.0  Intel Corporation 82371SB PIIX3 ISA [Natoma/Triton II] [8086:7000]
+           +-01.1  Intel Corporation 82371SB PIIX3 IDE [Natoma/Triton II] [8086:7010]
+           +-01.2  Intel Corporation 82371SB PIIX3 USB [Natoma/Triton II] [8086:7020]
+           +-01.3  Intel Corporation 82371AB/EB/MB PIIX4 ACPI [8086:7113]
+           +-02.0  Intel Corporation Device [8086:3e92]
+           +-03.0  Red Hat, Inc Virtio memory balloon [1af4:1002]
+           +-05.0  Red Hat, Inc Virtio SCSI [1af4:1004]
+           +-08.0  Red Hat, Inc Virtio console [1af4:1003]
+           +-11.0  Intel Corporation Device [8086:a348]
+           +-12.0  Intel Corporation 82540EM Gigabit Ethernet Controller [8086:100e]
+           +-1e.0-[01-02]--+-1b.0  Red Hat, Inc. QEMU XHCI Host Controller [1b36:000d]
+           |               \-1e.0-[02]--
+           \-1f.0  Intel Corporation Device [8086:a306]
+
+PS C:\Users\bruin\Downloads\pciutils-3.5.5-win64> ./lspci -s 0:11.0 -vvv
+00:11.0 Audio device: Intel Corporation Device a348 (rev 10)
+        Subsystem: Hewlett-Packard Company Device 83e2
+pcilib: 0000:00:11.0 64-bit device address ignored.
+pcilib: 0000:00:11.0 64-bit device address ignored.
+        Control: I/O- Mem+ BusMaster+ SpecCycle- MemWINV- VGASnoop- ParErr- Stepping- SERR+ FastB2B- DisINTx-
+        Status: Cap+ 66MHz- UDF- FastB2B- ParErr- DEVSEL=fast >TAbort- <TAbort- <MAbort- >SERR- <PERR- INTx-
+        Latency: 0
+        Interrupt: pin A routed to IRQ 11
+        Region 0: Memory at <ignored> (64-bit, non-prefetchable)
+        Region 4: Memory at <ignored> (64-bit, non-prefetchable)
+        Capabilities: [50] Power Management version 3
+                Flags: PMEClk- DSI- D1- D2- AuxCurrent=55mA PME(D0-,D1-,D2-,D3hot-,D3cold-)
+                Status: D0 NoSoftRst+ PME-Enable- DSel=0 DScale=0 PME-
+        Capabilities: [80] Vendor Specific Information: Len=14 <?>
+        Capabilities: [60] MSI: Enable- Count=1/1 Maskable- 64bit+
+                Address: 0000000000000000  Data: 0000
+```
+
+And interestingly, the output also shows a device `8086:a306` (`0:1f.0`, Intel Corporation Q370 Chipset LPC/eSPI Controller) which was not explicitly passed to the VM. This is a bit strange. Further test shows that `0:1f.0` is critical for iGPU passthrough, as if `0:1f.0` is removed (via `echo 1 > /sys/bus/pci/devices/0000\:00\:1f.0/remove`), the passthrough of iGPU (`0:2.0`) will fail:
+
+```
+# qm start 100
+swtpm_setup: Not overwriting existing state file.
+kvm: -device vfio-pci,host=0000:00:02.0,id=hostpci0,bus=pci.0,addr=0x2,romfile=/usr/share/kvm/igpu-uhd630.rom:
+ IGD device 0000:00:02.0 does not support LPC bridge access,legacy mode disabled
+```
+
+## Workaround
+
+The current workaround is:
+
+- split each physical function in `0:1f.*` into different IOMMU group;
+- passthrough `0:1f.0` to the Windows VM as well;
+- reset the `0:1f.*` device after Windows VM stops, to simulate the status of the first boot;
+
+To this end:
+
+- replace the root's crontab entry with the following script:
+
+    ```
+    root@pve:~# crontab -l
+    @reboot /root/passthrough-tweak.sh
+
+    root@pve:~# cat /root/passthrough-tweak.sh
+    #!/usr/bin/bash
+
+    #
+    # put `0:1f.*` into separate iommu groups
+    #
+    echo 1 > /sys/bus/pci/devices/0000\:00\:1f.0/remove
+    echo 1 > /sys/bus/pci/devices/0000\:00\:1f.3/remove
+    echo 1 > /sys/bus/pci/devices/0000\:00\:1f.4/remove
+    echo 1 > /sys/bus/pci/devices/0000\:00\:1f.5/remove
+    echo 1 > /sys/bus/pci/devices/0000\:00\:1f.6/remove
+    echo 1 > /sys/bus/pci/rescan
+
+    #
+    # `0:1f.6` is NIC. Need restart networking
+    #
+    systemctl restart networking
+    systemctl restart netbird
+
+    sleep 10
+    ```
+
+- also passthrough `0:1f.0` by adding `hostpci1: 0000:00:1f.0` into `/etc/pve/qemu_server/100.cfg`. so we have 3 passthrough items in total:
+
+    ```
+    hostpci0: 0000:00:02,legacy-igd=1,romfile=igpu-uhd630.rom
+    hostpci1: 0000:00:1f.0
+    hostpci2: 0000:00:1f.3
+    ```
+
+- setup a hook for VM stop thus whenever the VM stops, execute the same script again.
+
+    ```
+    # cat /var/lib/vz/snippets/vm100-hooks.sh
+    #!/usr/bin/bash
+
+    # ref: https://gist.github.com/kiler129/215e2c8de853209ca429ad5ed40ce128
+
+    set -e -o errexit -o pipefail -o nounset
+
+    # Do not modify these variables (set by Proxmox when calling the script)
+    vmId="$1"
+    runPhase="$2"
+    echo "Entering $runPhase on VM=$vmId"
+
+    case "$runPhase" in
+        pre-start)
+          ;;
+        post-start)
+          ;;
+        pre-stop)
+          echo "    - Running $runPhase hook on VM=$vmId"
+          source /root/passthrough-tweak.sh
+          echo "    - Finished $runPhase hook on VM=$vmId"
+          ;;
+        post-stop)
+          ;;
+        *)
+          echo "Unknown run phase \"$runPhase\"!"
+          ;;
+    esac
+
+    # qm set 100 --hookscript local:snippets/vm100-hooks.sh
+    ```
+
+With all these steps, the DP audio output issue is most like resolved, with the following limitations:
+
+- To restart the VM, one needs to execute `qm stop 100 && qm start 100` on the pve host; Reboot from VM itself does not trigger the hooks.
+- Each time the VM stops, the host network will be reset once (and re-enabled short after). So far ssh connection seems not broken during the reset, but it may impact critical network traffic. Adding a USB NIC for the host (and leaving `0:1f.6` un-used) might be a choice.
 
 # References
 
