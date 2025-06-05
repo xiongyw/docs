@@ -1,29 +1,35 @@
 # Background
 
 - Created: 2025.6.2
-- Last Updated: 2026.6.4
+- Last Updated: 2026.6.5
 
-The purpose is to test iGPU throughput to Windows 11 VM, on `HP EliteDesk 800 G4 DM`, using PVE 8.4-1 which comes with qemu 9.2.0.
+The purpose is to test the setup for iGPU passthrough to Windows 11 VM, on and old mini PC `HP EliteDesk 800 G4 DM`, using PVE `8.4-1` which comes with qemu `9.2.0`. The main incentive is to levarage on Windows UI and its app ecosystem while handling the control of the native host to Linux; other potential benefits include (but not limited to):
+- data stored on Linux host and accessed from Windows (via Samba or virtio share);
+- snapshots for VMs (including Windows);
+- running multiple VMs in parallel;
 
-At high level, the process can be roughly divided into two steps:
+At high level, the setup process can be roughly divided into two steps:
 
-1. Host config for preparing passthrough, mainly on enabling iommu, loading proper kernel drivers and blacklisting gpu drivers.
+1. Host config for preparing passthrough, mainly on enabling iommu, iommu group adjustment, loading proper kernel drivers and blacklisting gpu drivers.
 2. VM config, in terms of vbios, vm's bios/machine selection and configs
 
 What can be achieved for Windows 11 VM:
 
-- Graphic: passthrough the `UHD Graphics 630` as a PCIe device.
-- Sound (via Bluebooth): passthrough the Bluetooth USB device, via id-based redirection.
+- Graphics: passthrough the `UHD Graphics 630` as a PCIe device.
+- Audio, two options:
+    - not ideal: CPU decoding, output via Bluebooth (passthrough the Bluetooth USB device, via id-based redirection).
+    - ideal: passthrough the `Intel Cannon Lake PCH cAVS` as a PCIe device. In this case, audio signal can be transimitted via the DP port.
 - Mouse/Keyboard: passthrough a 2.4G USB-dangle receiver, also via id-based redirection.
 - WiFi: passthrough WiFi as another PCIe device. This is optional as the VM can use bridged NIC.
 
 Key observations:
 
-- For iGPU passthrough, the VBIOS (ROM image) is vital. Dumping/extracting the VBIOS from firmware is complicated. We downloaded one for UHD630 from [the web](https://www.123pan.com/s/20P0Vv-d2A6H.html), which works only in [`legacy-igd` mode](https://github.com/qemu/qemu/blob/master/docs/igd-assign.txt#L48), making it the primary and exclusive graphics device in the VM. Requires `pc-i440fx` machine type and emulated VGA set to `none`.
+- For iGPU passthrough, the VBIOS (ROM image) is vital. Dumping/extracting the VBIOS from firmware is sort of complicated. We downloaded one for UHD630 from [the web](https://www.123pan.com/s/20P0Vv-d2A6H.html), which works only in [`legacy-igd` mode](https://github.com/qemu/qemu/blob/master/docs/igd-assign.txt#L48), making it the primary and exclusive graphics device in the VM. Requires `pc-i440fx` machine type and emulated VGA set to `none`.
 - IOMMU group limitation: Linux kernel only passthrough **all** endpoints in an iommu group. Thus if a pcie endpoint (say A) belongs to an IOMMU group which also contains other endpoints (say B and C), it's not possible (or difficult) to only passthrough A while leaving B and C in the host. In this setup, as the audio device (`00:1f.3`) belongs to an IOMMU group contains other critical components for the host, it's not possible to passthrough it to Windows 11. The workaround is to passthrough the Bluetooth as an usb device to the VM and using a bluetooth speaker for sound.
-- It seems that adding kernel cmdline option `pcie_acs_override=downstream,multifunction,id:8086:a348,id:8086:a370` does not change the IOMMU grouping in this machine, suggesting that [Q370 PCH (Platform Controller Hub)](https://www.intel.com/content/www/us/en/products/sku/133282/intel-q370-chipset/specifications.html) may not support ACS properly.
-- It seems that manual `vfio_pci` binding may bypass kernel restriction in passthrough the whole group (at the security risk of DMA attack), but tests shown that passthroughing `0:1f.3` along causes host network `eno1` (`0:1f.5` in the same IOMMU group) been reset and disabled.
-- There is only one USB controller `0:14.0`, and it also IOMMU-grouped with `0:14.2`. Passing through the usb controller to the VM will leave the host without USB capabilities. The proper way is to use id-based redirection for USB devices, such as mouse/keyboard (`062a:4101`) and Bluetooth (`8087:0aaa`).
+    - It seems that adding kernel cmdline option `pcie_acs_override=downstream,multifunction,id:8086:a348,id:8086:a370` does not change the IOMMU grouping.
+    - It seems that manual `vfio_pci` binding may bypass kernel restriction in passthrough the whole group (at the security risk of DMA attack), but tests shown that passthroughing `0:1f.3` alone causes host network `eno1` (`0:1f.5` in the same IOMMU group) been reset and disabled.
+    - However, if we manually remove `0:1f.3` and rescan it, it will be in a separate IOMMU group. After that, passthrough `0:1f.3` works fine.
+- USB devices: as there is only one USB controller `0:14.0`, and it also IOMMU-grouped with `0:14.2`, passing through the usb controller to the VM will leave the host without USB capabilities. The proper way is to use id-based redirection for USB devices, such as mouse/keyboard (`062a:4101`) and Bluetooth (`8087:0aaa`), with some performance cost.
 
 # System Info
 
@@ -96,7 +102,7 @@ Bluetooth:
         ID 8087:0aaa Intel Corp. Bluetooth 9460/9560 Jefferson Peak (JfP)
 ```
 
-The following is the IOMMU group info after enabling IOMMU:
+The following is the default IOMMU group info after enabling IOMMU:
 
 ```
 # find /sys/kernel/iommu_groups/ -type l|sort
@@ -165,7 +171,7 @@ source /etc/network/interfaces.d/*
 - Assuming `vt-d` is already enabled in BIOS.
 
     ```
-    @pve:/home/bruin# dmesg|grep -i vt-d
+    # dmesg | grep -i vt-d
     [    4.942296] i915 0000:00:02.0: [drm] VT-d active for gfx access
     ```
 
@@ -178,6 +184,30 @@ source /etc/network/interfaces.d/*
       ```
 
     - Run `update-grub`: use `grep iommo /boot/grub/grub.cfg` to confirm the updates.
+- Manual remove and rescan `0:1f.3` (the integrated sound card in Q370 PCH chipset), by adding the following command in `root`'s crontab:
+
+    ```
+    @reboot echo 1 > /sys/bus/pci/devices/0000\:00\:1f.3/remove && echo 1 > /sys/bus/pci/rescan
+    ```
+
+    - The net effect of that, as manifested from `dmesg` log below, is that although `0:1f.3` was initially assigned to IOMMU group `7` (at `0.4` second), it will be removed/rescanned, and assigned to a separate group `8` later (at `8.*` second):
+
+        ```
+        # dmesg | grep 1f.3
+        [    0.405992] pci 0000:00:1f.3: [8086:a348] type 00 class 0x040300 conventional PCI endpoint
+        [    0.406119] pci 0000:00:1f.3: BAR 0 [mem 0x4000100000-0x4000103fff 64bit]
+        [    0.406135] pci 0000:00:1f.3: BAR 4 [mem 0x4000000000-0x40000fffff 64bit]
+        [    0.406266] pci 0000:00:1f.3: PME# supported from D3hot D3cold
+        [    0.497173] pci 0000:00:1f.3: Adding to iommu group 7
+        [    8.068148] pci 0000:00:1f.3: [8086:a348] type 00 class 0x040300 conventional PCI endpoint
+        [    8.068225] pci 0000:00:1f.3: BAR 0 [mem 0x4000100000-0x4000103fff 64bit]
+        [    8.068234] pci 0000:00:1f.3: BAR 4 [mem 0x4000000000-0x40000fffff 64bit]
+        [    8.068347] pci 0000:00:1f.3: PME# supported from D3hot D3cold
+        [    8.069536] pci 0000:00:1f.3: Adding to iommu group 8
+        [    8.069572] pci 0000:00:1f.3: BAR 4 [mem 0x4000000000-0x40000fffff 64bit]: assigned
+        [    8.069599] pci 0000:00:1f.3: BAR 0 [mem 0x4000100000-0x4000103fff 64bit]: assigned
+        ```
+
 - Enforce kernel modules binding:
     - Edit `/etc/modules`, add the following for loading these modules by default:
 
@@ -206,45 +236,51 @@ source /etc/network/interfaces.d/*
 
     - Run `update-initramfs -u -k all` to update initramfs accordingly for all kernels.
 
-- Reboot the host, check that IOMMU is enabled and PVE host is not using the iGPU (the display should frees around `Loading initial ramdisk ...`).
+- Reboot the host, now the display should freeze around `Loading initial ramdisk ...`. SSH to the host and check that IOMMU is enabled, and both iGPU ()`0:2.0`) and sound card (`0:1f.3`) are in their separate IOMMU groups (and bound to `vfio_pci` driver):
 
     ```
-    # dmesg |grep -e EMAR -e IOMMU -e AMD-Vi
-    [    0.000000] Warning: PCIe ACS overrides enabled; This may allow non-IOMMU protected peer-to-peer DMA
-    [    0.050582] DMAR: IOMMU enabled
-    [    0.147791] DMAR-IR: IOAPIC id 2 under DRHD base  0xfed91000 IOMMU 1
-    [    0.500116] DMAR: IOMMU feature fl1gp_support inconsistent
-    [    0.500118] DMAR: IOMMU feature pgsel_inv inconsistent
-    [    0.500120] DMAR: IOMMU feature nwfs inconsistent
-    [    0.500122] DMAR: IOMMU feature pasid inconsistent
-    [    0.500124] DMAR: IOMMU feature eafs inconsistent
-    [    0.500125] DMAR: IOMMU feature prs inconsistent
-    [    0.500127] DMAR: IOMMU feature nest inconsistent
-    [    0.500129] DMAR: IOMMU feature mts inconsistent
-    [    0.500130] DMAR: IOMMU feature sc_support inconsistent
-    [    0.500132] DMAR: IOMMU feature dev_iotlb_support inconsistent
+    root@pve:~# dmesg |grep -e EMAR -e IOMMU -e AMD-Vi
+    [    0.050470] DMAR: IOMMU enabled
+    [    0.146930] DMAR-IR: IOAPIC id 2 under DRHD base  0xfed91000 IOMMU 1
+    [    0.496641] DMAR: IOMMU feature fl1gp_support inconsistent
+    [    0.496643] DMAR: IOMMU feature pgsel_inv inconsistent
+    [    0.496645] DMAR: IOMMU feature nwfs inconsistent
+    [    0.496646] DMAR: IOMMU feature pasid inconsistent
+    [    0.496648] DMAR: IOMMU feature eafs inconsistent
+    [    0.496650] DMAR: IOMMU feature prs inconsistent
+    [    0.496651] DMAR: IOMMU feature nest inconsistent
+    [    0.496653] DMAR: IOMMU feature mts inconsistent
+    [    0.496654] DMAR: IOMMU feature sc_support inconsistent
+    [    0.496656] DMAR: IOMMU feature dev_iotlb_support inconsistent
 
     root@pve:~# dmesg|grep 00:02.0
-    [    0.390062] pci 0000:00:02.0: [8086:3e92] type 00 class 0x030000 PCIe Root Complex Integrated Endpoint
-    [    0.390092] pci 0000:00:02.0: BAR 0 [mem 0xe0000000-0xe0ffffff 64bit]
-    [    0.390098] pci 0000:00:02.0: BAR 2 [mem 0xd0000000-0xdfffffff 64bit pref]
-    [    0.390102] pci 0000:00:02.0: BAR 4 [io  0x3000-0x303f]
-    [    0.390126] pci 0000:00:02.0: Video device with shadowed ROM at [mem 0x000c0000-0x000dffff]
-    [    0.432419] pci 0000:00:02.0: vgaarb: setting as boot VGA device
-    [    0.432419] pci 0000:00:02.0: vgaarb: bridge control possible
-    [    0.432419] pci 0000:00:02.0: vgaarb: VGA device added: decodes=io+mem,owns=io+mem,locks=none
-    [    0.486672] pci 0000:00:02.0: Adding to iommu group 0
-    [    2.949009] vfio-pci 0000:00:02.0: vgaarb: deactivate vga console
-    [    2.949013] vfio-pci 0000:00:02.0: vgaarb: VGA decodes changed: olddecodes=io+mem,decodes=io+mem:owns=io+mem
+    [    0.392817] pci 0000:00:02.0: [8086:3e92] type 00 class 0x030000 PCIe Root Complex Integrated Endpoint
+    [    0.392847] pci 0000:00:02.0: BAR 0 [mem 0xe0000000-0xe0ffffff 64bit]
+    [    0.392853] pci 0000:00:02.0: BAR 2 [mem 0xd0000000-0xdfffffff 64bit pref]
+    [    0.392857] pci 0000:00:02.0: BAR 4 [io  0x3000-0x303f]
+    [    0.392881] pci 0000:00:02.0: Video device with shadowed ROM at [mem 0x000c0000-0x000dffff]
+    [    0.442186] pci 0000:00:02.0: vgaarb: setting as boot VGA device
+    [    0.442186] pci 0000:00:02.0: vgaarb: bridge control possible
+    [    0.442186] pci 0000:00:02.0: vgaarb: VGA device added: decodes=io+mem,owns=io+mem,locks=none
+    [    0.496918] pci 0000:00:02.0: Adding to iommu group 0
+    [    3.138849] vfio-pci 0000:00:02.0: vgaarb: deactivate vga console
+    [    3.138854] vfio-pci 0000:00:02.0: vgaarb: VGA decodes changed: olddecodes=io+mem,decodes=io+mem:owns=io+mem
 
     root@pve:~# dmesg|grep 00:1f.3
-    [    0.396804] pci 0000:00:1f.3: [8086:a348] type 00 class 0x040300 conventional PCI endpoint
-    [    0.396931] pci 0000:00:1f.3: BAR 0 [mem 0x4000100000-0x4000103fff 64bit]
-    [    0.396947] pci 0000:00:1f.3: BAR 4 [mem 0x4000000000-0x40000fffff 64bit]
-    [    0.397078] pci 0000:00:1f.3: PME# supported from D3hot D3cold
-    [    0.486934] pci 0000:00:1f.3: Adding to iommu group 7
+    [    0.405992] pci 0000:00:1f.3: [8086:a348] type 00 class 0x040300 conventional PCI endpoint
+    [    0.406119] pci 0000:00:1f.3: BAR 0 [mem 0x4000100000-0x4000103fff 64bit]
+    [    0.406135] pci 0000:00:1f.3: BAR 4 [mem 0x4000000000-0x40000fffff 64bit]
+    [    0.406266] pci 0000:00:1f.3: PME# supported from D3hot D3cold
+    [    0.497173] pci 0000:00:1f.3: Adding to iommu group 7
+    [    8.068148] pci 0000:00:1f.3: [8086:a348] type 00 class 0x040300 conventional PCI endpoint
+    [    8.068225] pci 0000:00:1f.3: BAR 0 [mem 0x4000100000-0x4000103fff 64bit]
+    [    8.068234] pci 0000:00:1f.3: BAR 4 [mem 0x4000000000-0x40000fffff 64bit]
+    [    8.068347] pci 0000:00:1f.3: PME# supported from D3hot D3cold
+    [    8.069536] pci 0000:00:1f.3: Adding to iommu group 8
+    [    8.069572] pci 0000:00:1f.3: BAR 4 [mem 0x4000000000-0x40000fffff 64bit]: assigned
+    [    8.069599] pci 0000:00:1f.3: BAR 0 [mem 0x4000100000-0x4000103fff 64bit]: assigned
 
-    # find /sys/kernel/iommu_groups/ -type l|sort
+    root@pve:~# find /sys/kernel/iommu_groups/ -type l|sort
     /sys/kernel/iommu_groups/0/devices/0000:00:02.0
     /sys/kernel/iommu_groups/1/devices/0000:00:00.0
     /sys/kernel/iommu_groups/2/devices/0000:00:12.0
@@ -255,10 +291,10 @@ source /etc/network/interfaces.d/*
     /sys/kernel/iommu_groups/5/devices/0000:00:16.3
     /sys/kernel/iommu_groups/6/devices/0000:00:17.0
     /sys/kernel/iommu_groups/7/devices/0000:00:1f.0
-    /sys/kernel/iommu_groups/7/devices/0000:00:1f.3
     /sys/kernel/iommu_groups/7/devices/0000:00:1f.4
     /sys/kernel/iommu_groups/7/devices/0000:00:1f.5
     /sys/kernel/iommu_groups/7/devices/0000:00:1f.6
+    /sys/kernel/iommu_groups/8/devices/0000:00:1f.3
 
     # lspci -s 0:2.0 -vv|grep -i "kernel"
             Kernel driver in use: vfio-pci
@@ -372,7 +408,7 @@ $ sudo qm config 100|grep scsi0
 scsi0: local-lvm:vm-100-disk-0,cache=writeback,size=64G
 ```
 
-Now add both efidisk and tmp from WebUI, making sure that they are `vm-100-disk-1` and  `vm-100-disk-2` respectively.
+Now add both EFIDisk and TPM from WebUI, making sure that they are `vm-100-disk-1` and  `vm-100-disk-2` respectively.
 
 Now set identical BIOS/VM ids (for keeping the Windows license be still valid in the clone):
 
@@ -401,14 +437,14 @@ Instead of extracting VBIOS from firmware, we download the VBIOS ROM from [the w
 
 The most reliable VBIOS is one extracted from the specific hardware, which matches the iGPU and motherboard firmware. Download firmware package from [hp support](https://support.hp.com/us-en/drivers/swdetails/hp-elitedesk-800-65w-g4-desktop-mini-pc/). The file name is `sp156646.exe`, which contains the firmware `Q21_023000.bin`, which in turn contains `Intel VBIOS 9.2.1014 (2018/06/21)` and `Intel GOP 9.0.1075`.
 
-FIXME: how to extract VBIOS from the firmware package?
+FIXME: how to extract VBIOS from this firmware package, which seems proprietary (or encrypted) somehow? Probably using a firmware from other vendors worth a try.
 
 ## VM Config
 
 The following is a working version of the VM config:
 
 ```
-# qm config 100
+root@pve:~# qm config 100
 agent: 1
 args: -set device.hostpci0.addr=02.0 -set device.hostpci0.x-igd-gms=0x2 -set device.hostpci0.x-igd-opregion=on
 bios: ovmf
@@ -417,7 +453,7 @@ cores: 4
 cpu: host
 efidisk0: local-lvm:vm-100-disk-1,efitype=4m,pre-enrolled-keys=1,size=4M
 hostpci0: 0000:00:02,legacy-igd=1,romfile=igpu-uhd630.rom
-hostpci1: 0000:00:14.3
+hostpci1: 0000:00:1f.3
 machine: pc-i440fx-9.2
 memory: 8192
 meta: creation-qemu=9.2.0,ctime=1748871264
@@ -425,6 +461,7 @@ name: win11
 net0: e1000=6E:FA:51:9A:D2:40,bridge=vmbr0,firewall=1
 numa: 0
 ostype: win11
+parent: apps
 scsi0: local-lvm:vm-100-disk-0,cache=writeback,size=64G
 scsihw: virtio-scsi-pci
 smbios1: uuid=194d50cf-8f86-4fa2-b770-28aa88109b43
@@ -432,6 +469,7 @@ sockets: 1
 tpmstate0: local-lvm:vm-100-disk-2,size=4M,version=v2.0
 usb0: host=062a:4101
 usb1: host=8087:0aaa
+usb2: host=3554:fc03
 vga: none
 vmgenid: 5a10564a-ca41-4136-93a9-f3f999390ac4
 ```
@@ -443,6 +481,7 @@ Brief explanation:
 - `hostpci0`: Passes the iGPU (0000:00:02.0) with:
     - `legacy-igd=1`: Enables legacy VGA arbitration for Intel integrated GPUs, critical for passthrough.
     - `romfile=igpu-uhd630.rom`: Specifies the VBIOS, with `/usr/share/kvm/` the PVE default path.
+- `hostpci1: 0000:00:1f.3`: the sound card. No rom file is needed.
 - `args`:
     - `set device.hostpci0.addr=02.0`: Remaps the iGPU to PCI address 02.0 in the guest (likely to match Windows expectations).
     - `set device.hostpci0.x-igd-gms=0x2`: Allocates 64 MB of stolen memory (0x2 = 2 * 32 MB) for the iGPU’s Graphics Memory System.
@@ -457,32 +496,32 @@ Brief explanation:
 The following is the host `dmesg` output when starting the Windows 11 VM:
 
 ```
-[  494.126884] tap100i0: entered promiscuous mode
-[  494.172975] vmbr0: port 2(fwpr100p0) entered blocking state
-[  494.172980] vmbr0: port 2(fwpr100p0) entered disabled state
-[  494.172995] fwpr100p0: entered allmulticast mode
-[  494.173033] fwpr100p0: entered promiscuous mode
-[  494.173080] vmbr0: port 2(fwpr100p0) entered blocking state
-[  494.173082] vmbr0: port 2(fwpr100p0) entered forwarding state
-[  494.182620] fwbr100i0: port 1(fwln100i0) entered blocking state
-[  494.182624] fwbr100i0: port 1(fwln100i0) entered disabled state
-[  494.182638] fwln100i0: entered allmulticast mode
-[  494.182677] fwln100i0: entered promiscuous mode
-[  494.182725] fwbr100i0: port 1(fwln100i0) entered blocking state
-[  494.182727] fwbr100i0: port 1(fwln100i0) entered forwarding state
-[  494.192365] fwbr100i0: port 2(tap100i0) entered blocking state
-[  494.192370] fwbr100i0: port 2(tap100i0) entered disabled state
-[  494.192382] tap100i0: entered allmulticast mode
-[  494.192443] fwbr100i0: port 2(tap100i0) entered blocking state
-[  494.192446] fwbr100i0: port 2(tap100i0) entered forwarding state
-[  495.151099] vfio-pci 0000:00:02.0: Invalid PCI ROM header signature: expecting 0xaa55, got 0xa1f9
-[  495.151115] vfio-pci 0000:00:02.0: Invalid PCI ROM header signature: expecting 0xaa55, got 0xa1f9
-[  495.151144] vfio-pci 0000:00:02.0: Invalid PCI ROM header signature: expecting 0xaa55, got 0xa1f9
-[  495.151161] vfio-pci 0000:00:02.0: Invalid PCI ROM header signature: expecting 0xaa55, got 0xa1f9
-[  508.622909] usb 1-1: reset full-speed USB device number 2 using xhci_hcd
-[  508.942997] usb 1-14: reset full-speed USB device number 3 using xhci_hcd
-[  512.330171] kvm: kvm [4638]: ignored rdmsr: 0x1ad data 0x0
-[  560.810476] usb 1-14: reset full-speed USB device number 3 using xhci_hcd
+[  271.673296] tap100i0: entered promiscuous mode
+[  271.726223] vmbr0: port 2(fwpr100p0) entered blocking state
+[  271.726228] vmbr0: port 2(fwpr100p0) entered disabled state
+[  271.726238] fwpr100p0: entered allmulticast mode
+[  271.726278] fwpr100p0: entered promiscuous mode
+[  271.726306] vmbr0: port 2(fwpr100p0) entered blocking state
+[  271.726308] vmbr0: port 2(fwpr100p0) entered forwarding state
+[  271.735801] fwbr100i0: port 1(fwln100i0) entered blocking state
+[  271.735806] fwbr100i0: port 1(fwln100i0) entered disabled state
+[  271.735820] fwln100i0: entered allmulticast mode
+[  271.735857] fwln100i0: entered promiscuous mode
+[  271.735905] fwbr100i0: port 1(fwln100i0) entered blocking state
+[  271.735907] fwbr100i0: port 1(fwln100i0) entered forwarding state
+[  271.745466] fwbr100i0: port 2(tap100i0) entered blocking state
+[  271.745470] fwbr100i0: port 2(tap100i0) entered disabled state
+[  271.745481] tap100i0: entered allmulticast mode
+[  271.745553] fwbr100i0: port 2(tap100i0) entered blocking state
+[  271.745556] fwbr100i0: port 2(tap100i0) entered forwarding state
+[  272.710758] vfio-pci 0000:00:02.0: Invalid PCI ROM header signature: expecting 0xaa55, got 0xa1f9
+[  272.710793] vfio-pci 0000:00:02.0: Invalid PCI ROM header signature: expecting 0xaa55, got 0xa1f9
+[  272.710887] vfio-pci 0000:00:02.0: Invalid PCI ROM header signature: expecting 0xaa55, got 0xa1f9
+[  272.710904] vfio-pci 0000:00:02.0: Invalid PCI ROM header signature: expecting 0xaa55, got 0xa1f9
+[  272.811391] vfio-pci 0000:00:1f.3: enabling device (0100 -> 0102)
+[  288.330812] usb 1-12: reset full-speed USB device number 2 using xhci_hcd
+[  288.651820] usb 1-14: reset full-speed USB device number 3 using xhci_hcd
+[  289.713857] kvm: kvm [3657]: ignored rdmsr: 0x1ad data 0x0
 ```
 
 Brief notes:
@@ -490,7 +529,7 @@ Brief notes:
 - The error report `Invalid PCI ROM header signature: expecting 0xaa55, got 0xa1f9` seems happens before loading the provided `igpu-uhd630.rom`, so it can be ignored.
 - The display screen blanks for about 15 seconds. It seems that the iGPU initialization happens betw `495.151161` and `508.622909`, as after that, the display LED turns from red to green, and then Windows UI shows up.
 - Append `-trace enable=vfio*,file=/var/log/qemu/100.log` to `args` line for getting some debug info during vm start.
-- If also passthrough `0:1f.3` (audio endpoint), then the host network will be broken while the VM still works. The related vm start time `dmesg` (using `journalctl -xb -1` after reboot) shows that `eno1` (`0:1f.6`) was reset and disabled. This suggests that the IOMMU group for `0:1f.*` is hardware-tied somehow, which is different from IOMMU group for `0:14.*` (as the WiFi device `0:14.3` can be passthrough alone to the VM).
+- If passthrough `0:1f.3` (sound card) when it's in the default IOMMU group `7`, then the host network will be broken when VM starts (not that the VM still works fine). The related vm start time `dmesg` (using `journalctl -xb -1` after reboot) shows that `eno1` (`0:1f.6`) was reset and disabled.
 
     ```
     Jun 03 20:35:58 pve kernel: Deleting MTD partitions on "0000:00:1f.5":
@@ -506,13 +545,9 @@ Brief notes:
 # References
 
 - [Grok3](https://x.com/i/grok) or [DeepSeek](https://chat.deepseek.com/): ask them about anything!
-- [教程: PVE下uhd630核显直通HDMI输出 以NUC9为例](https://zhuanlan.zhihu.com/p/704779862)
-- [Intel Graphics Device (IGD) assignment with vfio-pci](https://github.com/qemu/qemu/blob/master/docs/igd-assign.txt)
-- [PVE PCIe Passthrough](https://pve.proxmox.com/wiki/PCI(e)_Passthrough)
-- [iGPU Passthrough to VM (Intel Integrated Graphics)](https://3os.org/infrastructure/proxmox/gpu-passthrough/igpu-passthrough-to-vm/)
-- [Proxmox VE 8.3: Windows 11 vGPU (VT-d) Passthrough with Intel Alder Lake](https://www.derekseaman.com/2024/07/proxmox-ve-8-2-windows-11-vgpu-vt-d-passthrough-with-intel-alder-lake.html)
-- [`q35` issues discussion](https://github.com/gangqizai/igd/issues/1)
-- [pve环境10代i5-10400核显直通](https://linkzz.org/posts/pve-igd-passthrough/): using UBU to extract VBIOS from firmware image (in case the firmware image is not recognized by UBU, download one from other manufacturer such as `asrockchina.com.cn` and give it a try).
+- [教程: PVE下uhd630核显直通HDMI输出 以NUC9为例](https://zhuanlan.zhihu.com/p/704779862): this post gives the url for VBIOS download.
+- [Alder Lake full iGPU passthrough - audio over HDMI stops working after VM reboot](https://forum.proxmox.com/threads/alder-lake-full-igpu-passthrough-audio-over-hdmi-stops-working-after-vm-reboot.155241/): this post indicates that remove/rescan endpoints can result in different IOMMU grouping.
+- [pve环境10代i5-10400核显直通](https://linkzz.org/posts/pve-igd-passthrough/): this post shows how to extract VBIOS from firmware image, using `UBU`.
 
     ```
                   UBU             EfiRom             rom-parser
@@ -521,7 +556,12 @@ Brief notes:
     ```
 
     - `UBU` can be downloaded following this post on [chiphell.com](https://www.chiphell.com/forum.php?mod=viewthread&tid=2596245)
-    - `EfiRom.exe`, and EDKII tool, can be downloaded from [github](https://github.com/tianocore/edk2-BaseTools-win32)
+    - `EfiRom.exe`, an EDK2 tool, can be downloaded from [github](https://github.com/tianocore/edk2-BaseTools-win32)
     - `rom-parser` source code can be downloaded from [github](https://github.com/awilliam/rom-parser)
+- [Intel Graphics Device (IGD) assignment with vfio-pci](https://github.com/qemu/qemu/blob/master/docs/igd-assign.txt)
+- [PVE PCIe Passthrough](https://pve.proxmox.com/wiki/PCI(e)_Passthrough)
+- [iGPU Passthrough to VM (Intel Integrated Graphics)](https://3os.org/infrastructure/proxmox/gpu-passthrough/igpu-passthrough-to-vm/)
+- [Proxmox VE 8.3: Windows 11 vGPU (VT-d) Passthrough with Intel Alder Lake](https://www.derekseaman.com/2024/07/proxmox-ve-8-2-windows-11-vgpu-vt-d-passthrough-with-intel-alder-lake.html)
+- [`q35` issues discussion](https://github.com/gangqizai/igd/issues/1)
 - [Proxmox 5700G APU GPU Passthrough Notes](https://gist.github.com/matt22207/bb1ba1811a08a715e32f106450b0418a)
-- [Proxmox - Ryzen 7000 series - AMD Radeon 680M/780M/RDNA2/RDNA3 GPU passthrough](https://github.com/isc30/ryzen-gpu-passthrough-proxmox): VBIOS files are included.
+- [Proxmox - Ryzen 7000 series - AMD Radeon 680M/780M/RDNA2/RDNA3 GPU passthrough](https://github.com/isc30/ryzen-gpu-passthrough-proxmox): a bunch of AMD VBIOS files are included.
