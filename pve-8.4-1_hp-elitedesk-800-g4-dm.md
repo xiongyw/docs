@@ -3,7 +3,7 @@
 - Created: 2025.6.2
 - Last Updated: 2026.6.5
 
-The purpose is to test the setup for iGPU passthrough to Windows 11 VM, on and old mini PC `HP EliteDesk 800 G4 DM`, using PVE `8.4-1` which comes with qemu `9.2.0`. The main incentive is to levarage on Windows UI and its app ecosystem while handling the control of the native host to Linux; other potential benefits include (but not limited to):
+The purpose is to test the setup for iGPU passthrough to Windows 11 VM, on an old mini PC `HP EliteDesk 800 G4 DM`, using PVE `8.4-1` which comes with qemu `9.2.0`. The main incentive is to levarage on Windows UI and its app ecosystem while handling the control of the native host to Linux; other potential benefits include (but not limited to):
 - data stored on Linux host and accessed from Windows (via Samba or virtio share);
 - snapshots for VMs (including Windows);
 - running multiple VMs in parallel;
@@ -640,7 +640,7 @@ The current workaround is:
 
 - split each physical function in `0:1f.*` into different IOMMU group;
 - passthrough `0:1f.0` to the Windows VM as well;
-- reset the `0:1f.*` device after Windows VM stops, to simulate the status of the first boot;
+- reset the `0:1f.*` device (as none of the functions support FLReset) after Windows VM stops, to simulate the status of the first boot;
 
 To this end:
 
