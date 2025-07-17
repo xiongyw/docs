@@ -1,7 +1,7 @@
 # Background
 
 - Created: 2025.6.29
-- Last Update: 2025.7.2
+- Last Update: 2025.7.15
 
 After testing iGPU passthrough on the [HP EliteDesk 800 G4 DM](https://github.com/xiongyw/docs/blob/master/pve-8.4-1_hp-elitedesk-800-g4-dm.md) and [Lenovo M920x Tiny](https://github.com/xiongyw/docs/blob/master/pve-8.4-1_lenovo-m920x-tiny.md) (both with Intel UHD Graphics 630), I decided to test AMD's iGPU. I purchased a Mini PC, the [Minisforum `UM880PRO`](https://www.minisforum.com/pages/product-info), equipped with an AMD Ryzen 7 8845HS CPU and integrated an iGPU `Radeon 780m Graphics (Phoenix3)`.
 
@@ -40,7 +40,7 @@ devcon.exe enable "PCI\VEN_1002&DEV_1900*"
 devcon.exe enable "HDAUDIO\FUNC_01&VEN_1002&DEV_AA01*"
 ```
 
-After this step, goal `a)` was achieved, while goal `b)` was not.
+After this step, goal `a)` was achieved, while goal `b)` not.
 
 ## VM hook on Host
 
@@ -818,6 +818,29 @@ Note that I installed `netbird` on pve host which has a static ip, so here I can
 
 For the 2nd port `enp3s0`, I may create another bridge `wanbr` binding it, and install a VM router/gateway between these two bridges...,  someday.
 
+PS (2025.7.16): adding eGPU via oculink will change the pcie topology thus the nic names. For having persistent nic names, do the following by renaming the nics to `eth0` and `eth1` respectively:
+
+```
+root@d12pve:~# cat /etc/udev/rules.d/70-persistent-nic.rules
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="58:47:ca:7e:d4:39", NAME="eth0"
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="58:47:ca:7e:d4:38", NAME="eth1"
+
+root@d12pve:~# cat /etc/network/interfaces
+source /etc/network/interfaces.d/*
+
+auto lo
+iface lo inet loopback
+
+iface eth0 inet manual
+iface eth1 inet manual
+
+auto lanbr
+iface lanbr inet dhcp
+        bridge-ports eth0
+        bridge-stp off
+        bridge-fd 0
+```
+
 # Create Win11 VM
 
 ## VM migration (failed)
@@ -1014,6 +1037,99 @@ I plan to passthrough the following PCIe devices/functions to Windows 11 VM:
 The following is a picture I made trying to depict the PCIe bus topology, when the 2nd M.2 slot is also populated with a NVMe SSD (`5:0.0`), so the bus numbers are slightly different from the list above:
 
 ![pcie topology](./images/pcie-topology.png)
+
+Note that when the 2nd M.2 slot is populated with a GPU card (via oculink), the PCIe topology is different from that of NVME SSD. The following are two test cases.
+
+
+oculink with nvidia gpu:
+
+```
+bruin@d12pve:~$ cat oculink-nvidia-quadro600.txt
+-[0000:00]-+-00.0  Advanced Micro Devices, Inc. [AMD] Phoenix Root Complex [1022:14e8]
+           +-00.2  Advanced Micro Devices, Inc. [AMD] Phoenix IOMMU [1022:14e9]
+           +-01.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Host Bridge [1022:14ea]
+           +-01.1-[01]--+-00.0  NVIDIA Corporation GF108GL [Quadro 600] [10de:0df8]
+           |            \-00.1  NVIDIA Corporation GF108 High Definition Audio Controller [10de:0bea]
+           +-01.2-[02]----00.0  Micron/Crucial Technology P310 NVMe PCIe SSD (DRAM-less) [c0a9:5426]
+           +-02.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Host Bridge [1022:14ea]
+           +-02.1-[03]----00.0  Realtek Semiconductor Co., Ltd. RTL8125 2.5GbE Controller [10ec:8125]
+           +-02.2-[04]----00.0  Realtek Semiconductor Co., Ltd. RTL8125 2.5GbE Controller [10ec:8125]
+           +-02.3-[05]----00.0  MEDIATEK Corp. MT7922 802.11ax PCI Express Wireless Network Adapter [14c3:0616]
+           +-03.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Host Bridge [1022:14ea]
+           +-03.1-[06-65]--
+           +-04.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Host Bridge [1022:14ea]
+           +-04.1-[66-c5]--
+           +-08.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Host Bridge [1022:14ea]
+           +-08.1-[c6]--+-00.0  Advanced Micro Devices, Inc. [AMD/ATI] Phoenix3 [1002:1900]
+           |            +-00.1  Advanced Micro Devices, Inc. [AMD/ATI] Rembrandt Radeon High Definition Audio Controller [1002:1640]
+           |            +-00.2  Advanced Micro Devices, Inc. [AMD] Phoenix CCP/PSP 3.0 Device [1022:15c7]
+           |            +-00.3  Advanced Micro Devices, Inc. [AMD] Device [1022:15b9]
+           |            +-00.4  Advanced Micro Devices, Inc. [AMD] Device [1022:15ba]
+           |            +-00.5  Advanced Micro Devices, Inc. [AMD] ACP/ACP3X/ACP6x Audio Coprocessor [1022:15e2]
+           |            \-00.6  Advanced Micro Devices, Inc. [AMD] Family 17h/19h HD Audio Controller [1022:15e3]
+           +-08.2-[c7]--+-00.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Function [1022:14ec]
+           |            \-00.1  Advanced Micro Devices, Inc. [AMD] AMD IPU Device [1022:1502]
+           +-08.3-[c8]--+-00.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Function [1022:14ec]
+           |            +-00.3  Advanced Micro Devices, Inc. [AMD] Device [1022:15c0]
+           |            +-00.4  Advanced Micro Devices, Inc. [AMD] Device [1022:15c1]
+           |            +-00.5  Advanced Micro Devices, Inc. [AMD] Pink Sardine USB4/Thunderbolt NHI controller [1022:1668]
+           |            \-00.6  Advanced Micro Devices, Inc. [AMD] Pink Sardine USB4/Thunderbolt NHI controller [1022:1669]
+           +-14.0  Advanced Micro Devices, Inc. [AMD] FCH SMBus Controller [1022:790b]
+           +-14.3  Advanced Micro Devices, Inc. [AMD] FCH LPC Bridge [1022:790e]
+           +-18.0  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 0 [1022:14f0]
+           +-18.1  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 1 [1022:14f1]
+           +-18.2  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 2 [1022:14f2]
+           +-18.3  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 3 [1022:14f3]
+           +-18.4  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 4 [1022:14f4]
+           +-18.5  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 5 [1022:14f5]
+           +-18.6  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 6 [1022:14f6]
+           \-18.7  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 7 [1022:14f7]
+```
+
+oculink with amd gpu:
+
+```
+$ cat oculink-radeon-hd6450.txt
+-[0000:00]-+-00.0  Advanced Micro Devices, Inc. [AMD] Phoenix Root Complex [1022:14e8]
+           +-00.2  Advanced Micro Devices, Inc. [AMD] Phoenix IOMMU [1022:14e9]
+           +-01.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Host Bridge [1022:14ea]
+           +-01.1-[01]--+-00.0  Advanced Micro Devices, Inc. [AMD/ATI] Caicos [Radeon HD 6450/7450/8450 / R5 230 OEM] [1002:6779]
+           |            \-00.1  Advanced Micro Devices, Inc. [AMD/ATI] Caicos HDMI Audio [Radeon HD 6450 / 7450/8450/8490 OEM / R5 230/235/235X OEM] [1002:aa98]
+           +-01.2-[02]----00.0  Micron/Crucial Technology P310 NVMe PCIe SSD (DRAM-less) [c0a9:5426]
+           +-02.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Host Bridge [1022:14ea]
+           +-02.1-[03]----00.0  Realtek Semiconductor Co., Ltd. RTL8125 2.5GbE Controller [10ec:8125]
+           +-02.2-[04]----00.0  Realtek Semiconductor Co., Ltd. RTL8125 2.5GbE Controller [10ec:8125]
+           +-02.3-[05]----00.0  MEDIATEK Corp. MT7922 802.11ax PCI Express Wireless Network Adapter [14c3:0616]
+           +-03.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Host Bridge [1022:14ea]
+           +-03.1-[06-65]--
+           +-04.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Host Bridge [1022:14ea]
+           +-04.1-[66-c5]--
+           +-08.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Host Bridge [1022:14ea]
+           +-08.1-[c6]--+-00.0  Advanced Micro Devices, Inc. [AMD/ATI] Phoenix3 [1002:1900]
+           |            +-00.1  Advanced Micro Devices, Inc. [AMD/ATI] Rembrandt Radeon High Definition Audio Controller [1002:1640]
+           |            +-00.2  Advanced Micro Devices, Inc. [AMD] Phoenix CCP/PSP 3.0 Device [1022:15c7]
+           |            +-00.3  Advanced Micro Devices, Inc. [AMD] Device [1022:15b9]
+           |            +-00.4  Advanced Micro Devices, Inc. [AMD] Device [1022:15ba]
+           |            +-00.5  Advanced Micro Devices, Inc. [AMD] ACP/ACP3X/ACP6x Audio Coprocessor [1022:15e2]
+           |            \-00.6  Advanced Micro Devices, Inc. [AMD] Family 17h/19h HD Audio Controller [1022:15e3]
+           +-08.2-[c7]--+-00.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Function [1022:14ec]
+           |            \-00.1  Advanced Micro Devices, Inc. [AMD] AMD IPU Device [1022:1502]
+           +-08.3-[c8]--+-00.0  Advanced Micro Devices, Inc. [AMD] Phoenix Dummy Function [1022:14ec]
+           |            +-00.3  Advanced Micro Devices, Inc. [AMD] Device [1022:15c0]
+           |            +-00.4  Advanced Micro Devices, Inc. [AMD] Device [1022:15c1]
+           |            +-00.5  Advanced Micro Devices, Inc. [AMD] Pink Sardine USB4/Thunderbolt NHI controller [1022:1668]
+           |            \-00.6  Advanced Micro Devices, Inc. [AMD] Pink Sardine USB4/Thunderbolt NHI controller [1022:1669]
+           +-14.0  Advanced Micro Devices, Inc. [AMD] FCH SMBus Controller [1022:790b]
+           +-14.3  Advanced Micro Devices, Inc. [AMD] FCH LPC Bridge [1022:790e]
+           +-18.0  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 0 [1022:14f0]
+           +-18.1  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 1 [1022:14f1]
+           +-18.2  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 2 [1022:14f2]
+           +-18.3  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 3 [1022:14f3]
+           +-18.4  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 4 [1022:14f4]
+           +-18.5  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 5 [1022:14f5]
+           +-18.6  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 6 [1022:14f6]
+           \-18.7  Advanced Micro Devices, Inc. [AMD] Phoenix Data Fabric; Function 7 [1022:14f7]
+```
 
 The following is an image take from [techpowerup](https://www.techpowerup.com/cpu-specs/ryzen-7-8845hs.c3400) showing the components and lane allocation inside AMD Ryzen 7 8845HS:
 
@@ -1943,11 +2059,197 @@ Promising...now it's easy to add a hook script for the vm, to automate the proce
 
 - PIP and [`Input-Leap`](https://github.com/input-leap/input-leap): the debugging process for iGPU passthrough involves at least two PCs, one is the working environment for web-searching and notes-taking, and the other is the target PVE/VM system. Working with two sets of KVM is a bit awkward, and it's not ideal even with a KVM switch (as you can only interact with one PC at a time). I found out that with a big display supporting Picture in Picture (PIP) is a bless (two PCs can display their desktop side by side on same monitor). With `input-leap` installed/configured on both PCs, the same set of keyboard/mouse will be automatically shared between the two PCs, with seamless ownership transition according to the current mouse focus point. Btw, I am using `DELL U3818DW` with 3840*1600 resolution, supporting several PIP modes. The monitor also supports "Power Delivery (PD) with DisplayPort Alt Mode", matching the same feature of `UM880Pro`.
 
+- Passthrough `c5:0.6`: this is the HD audio controller connecting to the `Realtek ALC269` on the mother board. Passthrough it to windows VM also enable the `Realtek ALC269` and the microphone.
+
+- Passthrought NPU (`c6:0.2`): tested status on 2025.7.11 with driver from [`NPU_RAI1.5_280_WHQL.zip`](https://ryzenai.docs.amd.com/en/latest/inst.html#install-npu-drivers):
+    - in native windows 11, NPU0 detected successfully in both device manager and task manager, with no flaw.
+    - in windwos 11 vm, device manager reports error code 43, and task manager does not show NPU.
+
 - TODO:
     - Testing the passthrough of `c5:0.5` and `c5:0.6` as well.
         - `c5:0.5` is audio related DSP which may offload task from cpu;
-        - `c5:0.6` is the HD audio controller connecting to the `Realtek ALC269` on the mother board. This may bring ADC/DAC capabilities to the VM (e.g., sound recording).
     - Don't know what to do with the WIFI yet. Keeping it in the PVE host to setup an AP, or passthrough to Windows as well (for what purpose)?
+
+# Resource Mapping
+
+The problem: when the 2nd M.2 slot is populated (or connected another device via oculink), the BDF ids of some PCIe devices will be changed. This will cause the Windows VM starts fail due to wrong (or non-existing device) devices been passed through. The solution is use [Resource Mapping](https://pve.proxmox.com/wiki/QEMU/KVM_Virtual_Machines#resource_mapping) for pcie devices in VM config, instead of using BDF.
+
+- Add the mappings from WebUI: `Datacenter -> Resource Mapping`. Note that for adding iGPU, use the full BDF (`c5:00.0`) instead of `c5:00` (just ignore the warning). The cmd line syntax is:
+
+    ```
+    # pvesh create /cluster/mapping/pci --id <mapping_id> --map node=<node_name>,path=<pci_path>,id=<vendor_id>:<device_id>[,iommugroup=<iommu_group_number>][,subsystem-id=<subsystem_vendor_id>:<subsystem_device_id>]
+    ```
+
+- Check the mappings from cli:
+
+    ```
+    root@d12pve:~# pvesh ls /cluster/mapping/pci
+    -rw-d        hdaudio
+    -rw-d        hdmi-audio
+    -rw-d        igpu
+    -rw-d        npu
+    root@d12pve:~#
+    root@d12pve:~# pvesh get /cluster/mapping/pci/igpu
+    ┌────────┬─────────────────────────────────────────────────────────────────────────────────────┐
+    │ key    │ value                                                                               │
+    ╞════════╪═════════════════════════════════════════════════════════════════════════════════════╡
+    │ digest │ faf825d400c2860deecfd5945ce7a6e3648162a5                                            │
+    ├────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+    │ map    │ ["id=1002:1900,iommugroup=18,node=d12pve,path=0000:c5:00.0,subsystem-id=1f4c:b016"] │
+    ├────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+    │ type   │ pci                                                                                 │
+    └────────┴─────────────────────────────────────────────────────────────────────────────────────┘
+    root@d12pve:~# pvesh get /cluster/mapping/pci/hdmi-audio
+    ┌────────┬─────────────────────────────────────────────────────────────────────────────────────┐
+    │ key    │ value                                                                               │
+    ╞════════╪═════════════════════════════════════════════════════════════════════════════════════╡
+    │ digest │ faf825d400c2860deecfd5945ce7a6e3648162a5                                            │
+    ├────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+    │ map    │ ["id=1002:1640,iommugroup=19,node=d12pve,path=0000:c5:00.1,subsystem-id=1f4c:b016"] │
+    ├────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+    │ type   │ pci                                                                                 │
+    └────────┴─────────────────────────────────────────────────────────────────────────────────────┘
+    root@d12pve:~# pvesh get /cluster/mapping/pci/hdaudio
+    ┌────────┬─────────────────────────────────────────────────────────────────────────────────────┐
+    │ key    │ value                                                                               │
+    ╞════════╪═════════════════════════════════════════════════════════════════════════════════════╡
+    │ digest │ faf825d400c2860deecfd5945ce7a6e3648162a5                                            │
+    ├────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+    │ map    │ ["id=1022:15e3,iommugroup=24,node=d12pve,path=0000:c5:00.6,subsystem-id=1f4c:b016"] │
+    ├────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+    │ type   │ pci                                                                                 │
+    └────────┴─────────────────────────────────────────────────────────────────────────────────────┘
+    root@d12pve:~# pvesh get /cluster/mapping/pci/npu
+    ┌────────┬─────────────────────────────────────────────────────────────────────────────────────┐
+    │ key    │ value                                                                               │
+    ╞════════╪═════════════════════════════════════════════════════════════════════════════════════╡
+    │ digest │ faf825d400c2860deecfd5945ce7a6e3648162a5                                            │
+    ├────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+    │ map    │ ["id=1022:1502,iommugroup=26,node=d12pve,path=0000:c6:00.1,subsystem-id=1f4c:b016"] │
+    ├────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+    │ type   │ pci                                                                                 │
+    └────────┴─────────────────────────────────────────────────────────────────────────────────────┘
+    root@d12pve:~#
+    root@d12pve:~# cat /etc/pve/mapping/pci.cfg
+    hdmi-audio
+            map id=1002:1640,iommugroup=19,node=d12pve,path=0000:c5:00.1,subsystem-id=1f4c:b016
+
+    hdaudio
+            map id=1022:15e3,iommugroup=24,node=d12pve,path=0000:c5:00.6,subsystem-id=1f4c:b016
+
+    npu
+            map id=1022:1502,iommugroup=26,node=d12pve,path=0000:c6:00.1,subsystem-id=1f4c:b016
+
+    igpu
+            map id=1002:1900,iommugroup=18,node=d12pve,path=0000:c5:00.0,subsystem-id=1f4c:b016
+    ```
+
+- Change the VM config, by using mapping names:
+
+    - Before: 
+    
+        ```
+        root@d12pve:~# qm config 100|grep hostpci
+        hostpci0: 0000:c5:00.0,pcie=1,x-vga=1,romfile=vbios_1002_1900.bin
+        hostpci1: 0000:c5:00.1,pcie=1,romfile=AMDGopDriver_8845hs.rom
+        hostpci2: 0000:c5:00.6,pcie=1
+        hostpci3: 0000:c6:00.1,pcie=1
+        ```
+
+    - After: 
+
+        ```    
+        root@d12pve:~# qm config 100|grep hostpci
+        hostpci0: mapping=igpu,pcie=1,x-vga=1,romfile=vbios_1002_1900.bin
+        hostpci1: mapping=hdmi-audio,pcie=1,romfile=AMDGopDriver_8845hs.rom
+        hostpci2: mapping=hdaudio,pcie=1
+        hostpci3: mapping=npu,pcie=1
+        ```
+
+The following is the resource mapping status shown in WebUI, when the M.2 slot kept empty (i.e., no BDF change):
+
+![Resource Mapping status](./images/pcie-resource-mapping.png)
+
+After adding an eGPU card to the 2nd M.2 slot via oculink, the resource mapping status shows failures. And the VM 100 starts failed with following error msg: `PCI device mapping invalid (hardware probably changed): pci device '0000:c5:00.0' not found`.
+
+The solution is "dynamically updating the resource mapping before vm start", using the script below:
+
+```
+root@d12pve:~# cat update-resource-mapping.sh
+#!/bin/bash
+
+# pve node name
+NODE=$(hostname)
+
+#  each row has two fields: "map_id  dev_id"
+RES=(
+      "igpu          1002:1900"
+      "hdmi-audio    1002:1640"
+      "hdaudio       1022:15e3"
+      "npu           1022:1502"
+)
+
+for row in "${RES[@]}"; do
+    IFS=' ' read -r name id <<< "$row"
+    fullpath=$(dirname $(grep -l "PCI_ID=${id^^}" /sys/bus/pci/devices/*/uevent))
+    path=$(basename $fullpath)
+    iommugroup=$(basename $(readlink -f $fullpath/iommu_group))
+    subsystem=$(lspci -s $path -vn|grep Subsystem|awk '{print $2}')
+
+    echo "<6>Update Resource Mapping: $name=> node=$NODE,id=$id,path=$path,iommugroup=$iommugroup,subsystem-id=$subsystem" > /dev/kmsg
+    pvesh delete /cluster/mapping/pci/$name
+    pvesh create /cluster/mapping/pci --id $name --map node=$NODE,path=$path,id=$id,iommugroup=$iommugroup,subsystem-id=$subsystem
+    pvesh get /cluster/mapping/pci/$name
+done
+```
+
+Invoke the script above in `pre-start` hook:
+
+```
+root@d12pve:~# cat /var/lib/vz/snippets/vm100-hooks.sh
+#!/usr/bin/bash
+
+# ref: https://gist.github.com/kiler129/215e2c8de853209ca429ad5ed40ce128
+
+set -e -o errexit -o pipefail -o nounset
+
+# Do not modify these variables (set by Proxmox when calling the script)
+vmId="$1"
+runPhase="$2"
+echo ">>> Entering $runPhase on VM=$vmId" > /dev/kmsg
+
+case "$runPhase" in
+    pre-start)
+      echo "### rescan pcie bus..." > /dev/kmsg
+      echo 1 > /sys/bus/pci/rescan
+      sleep 2
+      /root/update-resource-mapping.sh
+      ;;
+    post-start)
+      ;;
+    pre-stop)
+      echo "### remove gpu/snd devices..." > /dev/kmsg
+      GFX_PATH=$(dirname $(grep -l "PCI_ID=1002:1900" /sys/bus/pci/devices/*/uevent))
+      SND_PATH=$(dirname $(grep -l "PCI_ID=1002:1640" /sys/bus/pci/devices/*/uevent))
+      echo 1 > ${GFX_PATH}/remove
+      sleep 1
+      echo 1 > ${SND_PATH}/remove
+      sleep 1
+      ;;
+    post-stop)
+      echo "### rescan pcie bus..." > /dev/kmsg
+      echo 1 > /sys/bus/pci/rescan
+      sleep 2
+      ;;
+    *)
+      echo "### Unknown run phase \"$runPhase\"!" > /dev/kmsg
+      ;;
+esac
+
+echo "<<< Leaving $runPhase on VM=$vmId" > /dev/kmsg
+```
+
+
 
 # References
 
